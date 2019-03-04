@@ -24,9 +24,7 @@ static offsets_t *offsets[] =
         .data = 
         {
             .zonemap = 0xfffffff007624ec8,
-            .kernproc = 0xfffffff0076020d0,
             .realhost = 0xfffffff007607bb8,
-            .system_clock = 0xfffffff007078540,
         },
         .struct_offsets =
         {
@@ -63,9 +61,7 @@ static offsets_t *offsets[] =
         .data = 
         {
             .zonemap = 0xfffffff0075f3e50,
-            .kernproc = 0xfffffff0075d10a0,
             .realhost = 0xfffffff0075d6b98,
-            .system_clock = 0xfffffff00706d898,
         },
         .struct_offsets =
         {

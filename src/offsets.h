@@ -32,24 +32,12 @@ typedef struct {
         */
         uint64_t zonemap;
 
-        /* nm kernel | grep '_kernproc' */
-        uint64_t kernproc;
-
         /*
             _host_priv_self symbol
             'adrp x0, #realhost [...]'
             image: https://i.imgur.com/17CkpY8.png
         */
         uint64_t realhost;
-        
-        /*
-            joker -m kernel | grep 'clock_sleep_trap'
-            look for part of there code where it loads system_clock: 'adr x8, system_clock'
-            compares it against another register (ie. X23)
-            if they are not equal, it will load #5 into some wN register, and branch to the exit/func prologue
-            image: https://i.imgur.com/tidJdZz.png
-        */
-        uint64_t system_clock;
     } data;
 
     struct {
