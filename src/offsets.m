@@ -24,7 +24,6 @@ static offsets_t *offsets[] =
         .data = 
         {
             .zonemap = 0xfffffff007624ec8,
-            .realhost = 0xfffffff007607bb8,
         },
         .struct_offsets =
         {
@@ -61,7 +60,6 @@ static offsets_t *offsets[] =
         .data = 
         {
             .zonemap = 0xfffffff0075f3e50,
-            .realhost = 0xfffffff0075d6b98,
         },
         .struct_offsets =
         {

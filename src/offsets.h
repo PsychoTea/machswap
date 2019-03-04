@@ -31,13 +31,6 @@ typedef struct {
             image: https://i.imgur.com/ygMcZYs.png
         */
         uint64_t zonemap;
-
-        /*
-            _host_priv_self symbol
-            'adrp x0, #realhost [...]'
-            image: https://i.imgur.com/17CkpY8.png
-        */
-        uint64_t realhost;
     } data;
 
     struct {
