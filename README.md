@@ -6,6 +6,6 @@ Non-SMAP (<=A9) devices only.
 
 Many thanks to @s1guza, @littlelailo, and @qwertyoruiopz. 
 
-Writeup ETA soon?
+Writeup: https://sparkes.zone/blog/ios/2019/04/30/machswap-ios-12-kernel-exploit.html
 
 Twitter - https://twitter.com/iBSparkes 
